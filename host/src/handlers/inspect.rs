@@ -1,13 +1,13 @@
-use axum::{extract::State, http::StatusCode, Json};
+use axum::{http::StatusCode, Json};
 use std::sync::Arc;
 
-use crate::models::requests::{InspectRequest, InspectResponse, ErrorResponse};
-use crate::models::state::AppState;
 use crate::services::inspect::pull_and_inspect_image;
+use crate::models::requests::{ErrorResponse, InspectRequest, InspectResponse};
+use crate::models::state::AppState;
 
 pub async fn inspect_handler(
-    State(state): State<Arc<AppState>>,
     Json(payload): Json<InspectRequest>,
+    state: Arc<AppState>,
 ) -> Result<Json<InspectResponse>, (StatusCode, Json<ErrorResponse>)> {
     let oci_client = &state.oci_client;
 

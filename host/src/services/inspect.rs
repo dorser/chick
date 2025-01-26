@@ -1,12 +1,14 @@
+use crate::hyperlight::{acquire_sandbox, release_sandbox};
 use crate::models::package::DpkgRecord;
 use crate::models::requests::Layer;
-use crate::utils::errors::{ImagePullError, HyperlightGuestError};
+use crate::utils::errors::{HyperlightGuestError, ImagePullError};
 use flate2::read::GzDecoder;
-use oci_client::{Client, Reference, secrets::RegistryAuth};
-use hyperlight_common::flatbuffer_wrappers::function_types::{ParameterValue, ReturnType, ReturnValue};
-use hyperlight_host::{UninitializedSandbox, MultiUseSandbox, sandbox_state::transition::Noop, sandbox_state::sandbox::EvolvableSandbox};
-use tar::Archive;
+use hyperlight_common::flatbuffer_wrappers::function_types::{
+    ParameterValue, ReturnType, ReturnValue,
+};
+use oci_client::{secrets::RegistryAuth, Client, Reference};
 use std::io::Read;
+use tar::Archive;
 
 pub async fn pull_and_inspect_image(
     oci_client: &Client,
@@ -36,7 +38,15 @@ pub async fn pull_and_inspect_image(
                     layer.media_type, layer.digest
                 );
 
-                let packages = inspect_layer(&layer_buffer, "var/lib/dpkg/status")?;
+                let sandbox = acquire_sandbox().await;
+                let packages: Vec<DpkgRecord>;
+                {
+                    let mut sandbox_guard = sandbox.lock().await;
+                    packages =
+                        inspect_layer(&layer_buffer, "var/lib/dpkg/status", &mut sandbox_guard)
+                            .await?;
+                }
+                release_sandbox(sandbox).await;
                 let layer = Layer {
                     layer: layer.digest.to_string(),
                     packages,
@@ -57,9 +67,10 @@ pub async fn pull_and_inspect_image(
     Ok(layers)
 }
 
-fn inspect_layer(
+async fn inspect_layer(
     layer_data: &[u8],
     target_path: &str,
+    sandbox_guard: &mut tokio::sync::MutexGuard<'_, hyperlight_host::MultiUseSandbox>,
 ) -> Result<Vec<DpkgRecord>, Box<dyn std::error::Error>> {
     let gz = GzDecoder::new(layer_data);
     let mut archive = Archive::new(gz);
@@ -68,47 +79,33 @@ fn inspect_layer(
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?;
-        let mut sandbox_cfg = hyperlight_host::sandbox::SandboxConfiguration::default();
-        sandbox_cfg.set_input_data_size(33554432);
-        sandbox_cfg.set_host_exception_size(33554432);
-        sandbox_cfg.set_host_function_definition_size(33554432);
-        sandbox_cfg.set_guest_error_buffer_size(33554432);
-        sandbox_cfg.set_guest_panic_context_buffer_size(33554432);
-        sandbox_cfg.set_heap_size(33554432);
-        sandbox_cfg.set_output_data_size(33554432);
-                                      
+
         if path.to_string_lossy() == target_path {
             let mut buffer = Vec::new();
             entry.read_to_end(&mut buffer)?;
 
-            let uninitialized_sandbox = UninitializedSandbox::new(
-                hyperlight_host::GuestBinary::FilePath("/usr/local/bin/chick-guest".to_string()),
-                Some(sandbox_cfg),
-                None,
-                None,
-            ).expect("Failed to create uninitialized sandbox");
-        
-            let mut multi_use_sandbox: MultiUseSandbox = uninitialized_sandbox.evolve(Noop::default()).expect("Failed to evolve sandbox");
-            
-            let result = multi_use_sandbox.call_guest_function_by_name(
-                "Inspect",
-                ReturnType::VecBytes,
-                Some(vec![ParameterValue::VecBytes(buffer)]),
-            );
-        
+            let result = sandbox_guard
+                .call_guest_function_by_name(
+                    "Inspect",
+                    ReturnType::VecBytes,
+                    Some(vec![ParameterValue::VecBytes(buffer)]),
+                )
+                .map_err(|e| {
+                    Box::new(HyperlightGuestError {
+                        message: format!("Failed to call inspect: {}", e),
+                    })
+                });
+
             match result {
                 Ok(ReturnValue::String(result)) => {
                     packages = serde_json::from_str(&result).unwrap();
-                },
-                Ok(_) => {
-                    return Err(Box::new(HyperlightGuestError{
-                        message: format!("Invalid return type from inspect")
-                    }
-                    ))
-                },
-                Err(e) => {
-                    return Err(Box::new(e))
                 }
+                Ok(_) => {
+                    return Err(Box::new(HyperlightGuestError {
+                        message: format!("Invalid return type from inspect"),
+                    }))
+                }
+                Err(e) => return Err(Box::new(e)),
             }
         }
     }
