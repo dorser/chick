@@ -1,9 +1,10 @@
-use serde::{Deserialize, Serialize};
 use super::package::DpkgRecord;
+use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
 pub struct InspectRequest {
     pub image: String,
+    pub hyperlighted: bool,
 }
 
 #[derive(Serialize)]
