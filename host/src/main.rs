@@ -1,27 +1,34 @@
-use std::sync::Arc;
-use axum::{Router, routing::post};
+use axum::{routing::post, Router};
 use hyperlight::warm_up_pool;
+use std::sync::Arc;
 mod handlers;
+mod hyperlight;
+mod layer_cache;
 mod models;
 mod services;
 mod utils;
-mod hyperlight;
 
 use crate::handlers::inspect::inspect_handler;
+use crate::layer_cache::LayerCache;
 use crate::models::state::AppState;
+use anyhow;
+use tokio::sync::Mutex;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), anyhow::Error> {
     warm_up_pool().await;
     let config = oci_client::client::ClientConfig::default();
     let oci_client = Arc::new(oci_client::Client::new(config));
-    let app_state = Arc::new(AppState { oci_client });
+    let layer_cache = Arc::new(Mutex::new(LayerCache::new(std::path::Path::new(
+        "/tmp/oci_cache",
+    ))));
+    let app_state = Arc::new(AppState {
+        oci_client,
+        layer_cache,
+    });
 
     let app = Router::new()
-        .route("/inspect", post({
-            let app_state = Arc::clone(&app_state);
-            move |payload| inspect_handler(payload, app_state)
-        }))
+        .route("/inspect", post(inspect_handler))
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();

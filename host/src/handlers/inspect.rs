@@ -1,17 +1,16 @@
-use axum::{http::StatusCode, Json};
+use axum::{extract::State, http::StatusCode, Json};
 use std::sync::Arc;
 
-use crate::services::inspect::pull_and_inspect_image;
 use crate::models::requests::{ErrorResponse, InspectRequest, InspectResponse};
 use crate::models::state::AppState;
+use crate::services::inspect::pull_and_inspect_image;
 
 pub async fn inspect_handler(
+    State(state): State<Arc<AppState>>,
     Json(payload): Json<InspectRequest>,
-    state: Arc<AppState>,
 ) -> Result<Json<InspectResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let oci_client = &state.oci_client;
-
-    match pull_and_inspect_image(oci_client, &payload.image).await {
+    let layer_cache = state.layer_cache.lock().await;
+    match pull_and_inspect_image(&state.oci_client, &layer_cache, &payload.image).await {
         Ok(layers) => Ok(Json(InspectResponse {
             image: payload.image,
             layers,

@@ -1,7 +1,9 @@
 use crate::hyperlight::{acquire_sandbox, release_sandbox};
+use crate::layer_cache::LayerCache;
 use crate::models::package::DpkgRecord;
 use crate::models::requests::Layer;
 use crate::utils::errors::{HyperlightGuestError, ImagePullError};
+use anyhow;
 use flate2::read::GzDecoder;
 use hyperlight_common::flatbuffer_wrappers::function_types::{
     ParameterValue, ReturnType, ReturnValue,
@@ -12,8 +14,9 @@ use tar::Archive;
 
 pub async fn pull_and_inspect_image(
     oci_client: &Client,
+    layer_cache: &LayerCache,
     image_reference: &str,
-) -> Result<Vec<Layer>, Box<dyn std::error::Error>> {
+) -> Result<Vec<Layer>, anyhow::Error> {
     let mut layers = Vec::<Layer>::new();
     let reference = Reference::try_from(image_reference).map_err(|e| ImagePullError {
         message: format!("Invalid image reference: {}", e),
@@ -28,8 +31,9 @@ pub async fn pull_and_inspect_image(
 
     for layer in manifest.layers {
         let mut layer_buffer: Vec<u8> = Vec::new();
-        match oci_client
-            .pull_blob(&reference, &layer, &mut layer_buffer)
+
+        match layer_cache
+            .pull_or_get_cached_blob(&oci_client, &reference, &layer, &mut layer_buffer)
             .await
         {
             Ok(_) => {
@@ -54,9 +58,7 @@ pub async fn pull_and_inspect_image(
                 layers.push(layer);
             }
             Err(e) => {
-                return Err(Box::new(ImagePullError {
-                    message: e.to_string(),
-                }))
+                return Err(anyhow::anyhow!("Failed to pull image manifest: {}", e));
             }
         }
     }
@@ -71,7 +73,7 @@ async fn inspect_layer(
     layer_data: &[u8],
     target_path: &str,
     sandbox_guard: &mut tokio::sync::MutexGuard<'_, hyperlight_host::MultiUseSandbox>,
-) -> Result<Vec<DpkgRecord>, Box<dyn std::error::Error>> {
+) -> Result<Vec<DpkgRecord>, anyhow::Error> {
     let gz = GzDecoder::new(layer_data);
     let mut archive = Archive::new(gz);
     let mut packages: Vec<DpkgRecord> = vec![];
@@ -101,11 +103,9 @@ async fn inspect_layer(
                     packages = serde_json::from_str(&result).unwrap();
                 }
                 Ok(_) => {
-                    return Err(Box::new(HyperlightGuestError {
-                        message: format!("Invalid return type from inspect"),
-                    }))
+                    return Err(anyhow::anyhow!("Invalid return type from inspect"));
                 }
-                Err(e) => return Err(Box::new(e)),
+                Err(e) => return Err(anyhow::anyhow!(e)),
             }
         }
     }
